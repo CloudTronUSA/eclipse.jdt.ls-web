@@ -4,6 +4,9 @@ export interface WebJdtLsApi {
 	fallbackError?: unknown;
 	lint(uri: string, source: string): string;
 	lintProcessing(entrypointUri: string, entrypointSource: string, additionalPdesJson: string): string;
+	complete(uri: string, source: string, line: number, character: number): string;
+	hover(uri: string, source: string, line: number, character: number): string;
+	signatureHelp(uri: string, source: string, line: number, character: number): string;
 	handle(payload: string): string;
 }
 

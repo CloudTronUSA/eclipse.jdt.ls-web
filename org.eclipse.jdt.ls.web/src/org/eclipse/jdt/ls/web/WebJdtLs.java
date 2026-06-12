@@ -24,6 +24,21 @@ public final class WebJdtLs {
 	}
 
 	@JSExport
+	public static String complete(String uri, String source, int line, int character) {
+		return ENGINE.complete(uri, source, line, character);
+	}
+
+	@JSExport
+	public static String hover(String uri, String source, int line, int character) {
+		return ENGINE.hover(uri, source, line, character);
+	}
+
+	@JSExport
+	public static String signatureHelp(String uri, String source, int line, int character) {
+		return ENGINE.signatureHelp(uri, source, line, character);
+	}
+
+	@JSExport
 	public static String handle(String payload) {
 		return WebLspEndpoint.handle(payload, ENGINE);
 	}

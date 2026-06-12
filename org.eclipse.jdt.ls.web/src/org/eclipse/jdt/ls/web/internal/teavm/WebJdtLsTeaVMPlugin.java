@@ -8,5 +8,6 @@ public final class WebJdtLsTeaVMPlugin implements TeaVMPlugin {
 	@Override
 	public void install(TeaVMHost host) {
 		host.add(new EcjMessagesTransformer());
+		host.add(new ProcessingPreprocessorTransformer());
 	}
 }

@@ -58,7 +58,7 @@ function loadJs(config) {
 }
 
 function createApi(target, exports, raw) {
-	const missing = ["lint", "lintProcessing", "handle"].filter(name => typeof exports[name] !== "function");
+	const missing = ["lint", "lintProcessing", "complete", "hover", "signatureHelp", "handle"].filter(name => typeof exports[name] !== "function");
 	if (missing.length > 0) {
 		throw new Error("JDT LS web " + target + " build is missing export(s): " + missing.join(", "));
 	}
@@ -67,6 +67,9 @@ function createApi(target, exports, raw) {
 		raw,
 		lint: exports.lint,
 		lintProcessing: exports.lintProcessing,
+		complete: exports.complete,
+		hover: exports.hover,
+		signatureHelp: exports.signatureHelp,
 		handle: exports.handle
 	};
 }

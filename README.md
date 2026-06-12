@@ -1,13 +1,13 @@
 # Eclipse JDT LS Web
 
-This fork adds a lightweight browser-oriented Java linter built from Eclipse ECJ
-and TeaVM.
+This fork adds a lightweight browser-oriented Java/Processing language service
+built from Eclipse ECJ and TeaVM.
 
-The web module is `org.eclipse.jdt.ls.web`. It is intentionally focused on
-linting Java source text and related files in a folder. It can be compiled to
-WASM or JavaScript. It is not the desktop JDT LS server and it does not include
-editor integration, Maven/Gradle import, debugging, completion, hover, code
-actions, or a web app.
+The web module is `org.eclipse.jdt.ls.web`. It can be compiled to WebAssembly
+GC and JavaScript. It is not the desktop JDT LS server and it does not include
+Maven/Gradle import, debugging, code actions, or a web app. It does provide a
+small browser API and LSP-shaped endpoint for diagnostics, completion, hover,
+and signature help.
 
 ## Components
 
@@ -28,16 +28,23 @@ actions, or a web app.
 - ECJ-backed diagnostics for Java files.
 - In-memory folder source model, so files can resolve each other.
 - Basic LSP-shaped handling for initialize, open/change/close, watched file
-  changes, configuration changes, and publish diagnostics.
+  changes, configuration changes, completion, hover, signature help, and
+  publish diagnostics.
+- Direct JavaScript APIs: `lint`, `lintProcessing`, `complete`, `hover`,
+  `signatureHelp`, and `handle`.
 - Browser-bundled JDK API signatures generated from the build JDK's `ct.sym`,
-  covering the Java/JDK standard library signatures available for Java 17.
-  These are compile-time signatures for linting, not runtime implementations.
+  covering Java/JDK standard library signatures available for Java 17.
+- Browser-bundled TeaVM javac classpath and Processing core metadata for code
+  assist. These are compile-time/code-assist signatures, not runtime
+  implementations.
 - Processing Java mode for `.pde` sketches:
   - provide an entrypoint PDE file
   - provide any additional PDE files
-  - the linter generates a Processing-style Java sketch class extending
-    `processing.core.PApplet`
-  - Processing core API signatures are resolved from `org.processing:core`
+  - the web service runs Processing's original preprocessor
+  - preprocessor errors are returned as diagnostics
+  - Processing core APIs such as `PApplet`, `PFont`, `PImage`, `PVector`,
+    `createFont`, `text`, `textFont`, `textAlign`, `size`, and `fill` are
+    resolved from packed metadata
 
 ## Build TeaVM
 
@@ -49,12 +56,33 @@ cd third_party/teavm
 ./gradlew :core:publishToMavenLocal :classlib:publishToMavenLocal :jso:core:publishToMavenLocal :jso:apis:publishToMavenLocal :tools:maven:plugin:publishToMavenLocal
 ```
 
+The web module also requires a TeaVM javac distribution directory passed as
+`-Dteavm.javac.dist=...`. That directory must contain:
+
+```text
+compile-classlib-teavm.bin
+runtime-classlib-teavm.bin
+processing-core-teavm.jar
+```
+
 ## Build The Web Linter
 
 From the repository root:
 
 ```sh
-./mvnw -f org.eclipse.jdt.ls.web/pom.xml process-classes
+./mvnw -pl org.eclipse.jdt.ls.web \
+  -DskipTests=false \
+  -Dteavm.javac.dist=/home/cloudtron/teavm-javac/dist/teavm-javac \
+  test
+```
+
+For a build without the test verifier:
+
+```sh
+./mvnw -pl org.eclipse.jdt.ls.web \
+  -DskipTests \
+  -Dteavm.javac.dist=/home/cloudtron/teavm-javac/dist/teavm-javac \
+  process-classes
 ```
 
 Outputs:
@@ -85,7 +113,20 @@ import { load } from "eclipse-jdt-ls-web";
 
 const jdtls = await load();
 const diagnosticsJson = jdtls.lint("file:///Example.java", "class Example {}");
-console.log(jdtls.target, diagnosticsJson);
+const completionsJson = jdtls.complete(
+  "file:///Sketch.pde",
+  "void setup() { textF }",
+  0,
+  20
+);
+const hoverJson = jdtls.hover("file:///Example.java", "class Example {}", 0, 6);
+const signatureJson = jdtls.signatureHelp(
+  "file:///Sketch.pde",
+  "void setup() { createFont( }",
+  0,
+  26
+);
+console.log(jdtls.target, diagnosticsJson, completionsJson, hoverJson, signatureJson);
 ```
 
 For direct browser use without an npm bundler:
@@ -102,9 +143,9 @@ For direct browser use without an npm bundler:
 `load()` tries the WASM GC build first. If the browser cannot load it,
 including when WebAssembly GC or JSPI-related support is missing, the loader
 falls back to the JavaScript build and returns the same `lint`,
-`lintProcessing`, and `handle` functions. The returned `target` is `"wasm"` or
-`"js"`; if fallback was used, `fallbackError` contains the original WASM loading
-failure.
+`lintProcessing`, `complete`, `hover`, `signatureHelp`, and `handle` functions.
+The returned `target` is `"wasm"` or `"js"`; if fallback was used,
+`fallbackError` contains the original WASM loading failure.
 
 By default, the loader expects this generated layout to be served from one
 directory:
@@ -124,10 +165,16 @@ The TeaVM module exports:
 ```java
 org.eclipse.jdt.ls.web.WebJdtLs.lint(String uri, String source)
 org.eclipse.jdt.ls.web.WebJdtLs.lintProcessing(String entrypointUri, String entrypointSource, String additionalPdesJson)
+org.eclipse.jdt.ls.web.WebJdtLs.complete(String uri, String source, int line, int character)
+org.eclipse.jdt.ls.web.WebJdtLs.hover(String uri, String source, int line, int character)
+org.eclipse.jdt.ls.web.WebJdtLs.signatureHelp(String uri, String source, int line, int character)
 org.eclipse.jdt.ls.web.WebJdtLs.handle(String payload)
 ```
 
 `lint` returns a JSON array of diagnostics for one Java source.
+
+`complete`, `hover`, and `signatureHelp` return JSON strings shaped like LSP
+results. Method completions insert only the method name, not parentheses.
 
 `lintProcessing` expects `additionalPdesJson` in this shape:
 

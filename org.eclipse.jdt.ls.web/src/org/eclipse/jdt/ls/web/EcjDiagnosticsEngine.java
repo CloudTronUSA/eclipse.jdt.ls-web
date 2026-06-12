@@ -43,10 +43,31 @@ public final class EcjDiagnosticsEngine {
 		return json.toString();
 	}
 
+	public String complete(String uri, String source, int line, int character) {
+		return new EcjCompletionEngine().complete(uri, source, line, character, allSourcesWith(uri, source));
+	}
+
+	public String hover(String uri, String source, int line, int character) {
+		return new EcjCompletionEngine().hover(uri, source, line, character, allSourcesWith(uri, source));
+	}
+
+	public String signatureHelp(String uri, String source, int line, int character) {
+		return new EcjCompletionEngine().signatureHelp(uri, source, line, character, allSourcesWith(uri, source));
+	}
+
 	public String lintProcessing(String entrypointUri, String entrypointSource, String[] additionalPdes) {
-		ProcessingSketch sketch = ProcessingSketch.from(entrypointUri, entrypointSource, additionalPdes);
-		List<ProcessingSketch.MappedDiagnostic> diagnostics = sketch.mapDiagnostics(diagnoseCompilerOnly(sketch.compilationUnit(),
-				sketch.source, Collections.emptyMap()));
+		ProcessingSketch sketch;
+		List<ProcessingSketch.MappedDiagnostic> diagnostics;
+		try {
+			sketch = ProcessingSketch.from(entrypointUri, entrypointSource, additionalPdes);
+			diagnostics = sketch.hasPreprocessDiagnostics()
+					? sketch.preprocessDiagnostics()
+					: sketch.mapDiagnostics(diagnoseCompilerOnly(sketch.compilationUnit(),
+							sketch.source, Collections.emptyMap()));
+		} catch (Throwable ex) {
+			diagnostics = Collections.singletonList(new ProcessingSketch.MappedDiagnostic(entrypointUri,
+					processingFailureDiagnostic(entrypointSource, ex)));
+		}
 		StringBuilder json = new StringBuilder();
 		json.append('[');
 		for (int i = 0; i < diagnostics.size(); i++) {
@@ -60,11 +81,23 @@ public final class EcjDiagnosticsEngine {
 	}
 
 	public String publishProcessingDiagnostics(String entrypointUri, String entrypointSource, String[] additionalPdes) {
-		ProcessingSketch sketch = ProcessingSketch.from(entrypointUri, entrypointSource, additionalPdes);
-		List<ProcessingSketch.MappedDiagnostic> diagnostics = sketch.mapDiagnostics(diagnoseCompilerOnly(sketch.compilationUnit(),
-				sketch.source, Collections.emptyMap()));
+		ProcessingSketch sketch;
+		List<ProcessingSketch.MappedDiagnostic> diagnostics;
+		String[] sourceUris;
+		try {
+			sketch = ProcessingSketch.from(entrypointUri, entrypointSource, additionalPdes);
+			diagnostics = sketch.hasPreprocessDiagnostics()
+					? sketch.preprocessDiagnostics()
+					: sketch.mapDiagnostics(diagnoseCompilerOnly(sketch.compilationUnit(),
+							sketch.source, Collections.emptyMap()));
+			sourceUris = sketch.sourceUris();
+		} catch (Throwable ex) {
+			diagnostics = Collections.singletonList(new ProcessingSketch.MappedDiagnostic(entrypointUri,
+					processingFailureDiagnostic(entrypointSource, ex)));
+			sourceUris = processingSourceUris(entrypointUri, additionalPdes);
+		}
 		Map<String, List<DiagnosticData>> byUri = new LinkedHashMap<>();
-		for (String uri : sketch.sourceUris()) {
+		for (String uri : sourceUris) {
 			byUri.put(uri, new ArrayList<>());
 		}
 		for (ProcessingSketch.MappedDiagnostic mapped : diagnostics) {
@@ -88,9 +121,76 @@ public final class EcjDiagnosticsEngine {
 		return json.toString();
 	}
 
+	private static String[] processingSourceUris(String entrypointUri, String[] additionalPdes) {
+		List<String> uris = new ArrayList<>();
+		if (entrypointUri != null && !entrypointUri.isEmpty()) {
+			uris.add(entrypointUri);
+		}
+		for (String pde : additionalPdes) {
+			String uri = JsonSupport.stringField(pde, "uri");
+			if (uri.isEmpty()) {
+				uri = entrypointUri;
+			}
+			if (uri != null && !uri.isEmpty() && !uris.contains(uri)) {
+				uris.add(uri);
+			}
+		}
+		return uris.toArray(new String[0]);
+	}
+
+	private static DiagnosticData processingFailureDiagnostic(String source, Throwable ex) {
+		String message = ex.getMessage();
+		if (message == null || message.isEmpty()) {
+			message = ex.getClass().getSimpleName();
+		}
+		int line = 0;
+		int character = 0;
+		int endCharacter = 1;
+		if (source != null && !source.isEmpty()) {
+			int newline = source.indexOf('\n');
+			endCharacter = Math.max(1, newline >= 0 ? newline : source.length());
+		}
+		endCharacter = Math.max(character + 1, endCharacter);
+		return new DiagnosticData(line, character, line, endCharacter, 1, 0,
+				"Processing preprocessing failed: " + message);
+	}
+
 	public String publishDiagnostics(String uri, String source) {
 		documents.put(uri, source);
 		return publishAllDiagnostics();
+	}
+
+	public String completion(String uri, int line, int character) {
+		String source = documents.get(uri);
+		if (source == null) {
+			source = workspaceSources.get(uri);
+		}
+		if (source == null) {
+			source = "";
+		}
+		return new EcjCompletionEngine().complete(uri, source, line, character, allSources());
+	}
+
+	public String hover(String uri, int line, int character) {
+		String source = documents.get(uri);
+		if (source == null) {
+			source = workspaceSources.get(uri);
+		}
+		if (source == null) {
+			source = "";
+		}
+		return new EcjCompletionEngine().hover(uri, source, line, character, allSources());
+	}
+
+	public String signatureHelp(String uri, int line, int character) {
+		String source = documents.get(uri);
+		if (source == null) {
+			source = workspaceSources.get(uri);
+		}
+		if (source == null) {
+			source = "";
+		}
+		return new EcjCompletionEngine().signatureHelp(uri, source, line, character, allSources());
 	}
 
 	public String publishDiagnostics(String uri) {
@@ -231,6 +331,12 @@ public final class EcjDiagnosticsEngine {
 	private Map<String, String> allSources() {
 		Map<String, String> allSources = new LinkedHashMap<>(workspaceSources);
 		allSources.putAll(documents);
+		return allSources;
+	}
+
+	private Map<String, String> allSourcesWith(String uri, String source) {
+		Map<String, String> allSources = allSources();
+		allSources.put(uri, source);
 		return allSources;
 	}
 

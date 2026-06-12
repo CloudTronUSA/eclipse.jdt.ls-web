@@ -1,7 +1,15 @@
 package org.eclipse.jdt.ls.web;
 
+import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.List;
+
+import processing.mode.java.preproc.PdePreprocessIssue;
+import processing.mode.java.preproc.PdePreprocessor;
+import processing.mode.java.preproc.PreprocessorResult;
+import processing.mode.java.preproc.TextTransform;
+import processing.mode.java.preproc.TextTransform.OffsetMapper;
+import processing.utils.SketchException;
 
 final class ProcessingSketch {
 
@@ -9,54 +17,123 @@ final class ProcessingSketch {
 
 	final String uri;
 	final String source;
-	private final SourceSegment[] segments;
+	private final String unifiedSource;
+	private final OffsetMapper offsetMapper;
+	private final List<PdeTab> tabs;
 	private final String[] sourceUris;
+	private final List<MappedDiagnostic> preprocessDiagnostics;
 
-	private ProcessingSketch(String uri, String source, SourceSegment[] segments, String[] sourceUris) {
+	private ProcessingSketch(String uri, String source, String unifiedSource, OffsetMapper offsetMapper, List<PdeTab> tabs,
+			String[] sourceUris, List<MappedDiagnostic> preprocessDiagnostics) {
 		this.uri = uri;
 		this.source = source;
-		this.segments = segments;
+		this.unifiedSource = unifiedSource;
+		this.offsetMapper = offsetMapper;
+		this.tabs = tabs;
 		this.sourceUris = sourceUris;
+		this.preprocessDiagnostics = preprocessDiagnostics;
 	}
 
 	static ProcessingSketch from(String entrypointUri, String entrypointSource, String[] additionalPdes) {
 		List<PdeSource> pdes = new ArrayList<>();
-		pdes.add(processPde(entrypointUri, entrypointSource));
+		pdes.add(new PdeSource(entrypointUri, entrypointSource));
 		for (String pde : additionalPdes) {
 			String uri = JsonSupport.stringField(pde, "uri");
 			if (uri.isEmpty()) {
 				uri = entrypointUri;
 			}
-			pdes.add(processPde(uri, JsonSupport.lastStringField(pde, "text")));
+			pdes.add(new PdeSource(uri, JsonSupport.lastStringField(pde, "text")));
 		}
 
-		StringBuilder imports = new StringBuilder();
-		List<SourceSegment> segments = new ArrayList<>();
-		appendImplicitImports(imports);
+		StringBuilder unified = new StringBuilder();
+		List<PdeTab> tabs = new ArrayList<>();
+		int startLine = 0;
+		int startOffset = 0;
 		for (PdeSource pde : pdes) {
-			for (ImportLine imported : pde.imports) {
-				int generatedLine = lineCount(imports.toString());
-				imports.append(imported.text).append('\n');
-				segments.add(new SourceSegment(imported.uri, generatedLine, imported.sourceLine, 1, null));
+			tabs.add(new PdeTab(pde.uri, startLine, startOffset, pde.source.length()));
+			unified.append(pde.source).append('\n');
+			startLine += lineCount(pde.source) + 1;
+			startOffset = unified.length();
+		}
+
+		StringWriter writer = new StringWriter();
+		PreprocessorResult result;
+		try {
+			result = PdePreprocessor.builderFor(SKETCH_CLASS)
+					.setTabSize(2)
+					.setParseTreeListenerFactory(WebPdeParseTreeListener::new)
+					.build()
+					.write(writer, unified.toString());
+		} catch (SketchException ex) {
+			return new ProcessingSketch(syntheticUri(entrypointUri), "",
+					unified.toString(), OffsetMapper.EMPTY_MAPPER, tabs,
+					sourceUris(pdes), sketchExceptionDiagnostics(ex, tabs, unified.toString(), entrypointUri));
+		}
+
+		TextTransform transform = new TextTransform(unified.toString());
+		transform.addAll(result.getEdits());
+		List<MappedDiagnostic> preprocessDiagnostics = new ArrayList<>();
+		for (PdePreprocessIssue issue : result.getPreprocessIssues()) {
+			OriginalPosition position = positionForIssue(issue, tabs, unified.toString(), entrypointUri);
+			preprocessDiagnostics.add(new MappedDiagnostic(position.uri,
+					new EcjDiagnosticsEngine.DiagnosticData(position.line, position.character,
+							position.line, position.character + 1, 1, 0, issue.getMsg())));
+		}
+		String generatedSource = writer.toString();
+		if (generatedSource.isEmpty()) {
+			generatedSource = transform.apply();
+		}
+		return new ProcessingSketch(syntheticUri(entrypointUri), generatedSource,
+				unified.toString(), transform.getMapper(), tabs,
+				sourceUris(pdes), preprocessDiagnostics);
+	}
+
+	boolean hasPreprocessDiagnostics() {
+		return !preprocessDiagnostics.isEmpty();
+	}
+
+	List<MappedDiagnostic> preprocessDiagnostics() {
+		return preprocessDiagnostics;
+	}
+
+	private static List<MappedDiagnostic> sketchExceptionDiagnostics(SketchException ex, List<PdeTab> tabs,
+			String unifiedSource, String fallbackUri) {
+		List<MappedDiagnostic> diagnostics = new ArrayList<>();
+		OriginalPosition position;
+		if (ex.hasCodeIndex()) {
+			int index = Math.max(0, Math.min(ex.getCodeIndex(), tabs.size() - 1));
+			PdeTab tab = tabs.isEmpty() ? new PdeTab(fallbackUri, 0, 0, 0) : tabs.get(index);
+			position = new OriginalPosition(tab.uri, Math.max(0, ex.getCodeLine()), Math.max(0, ex.getCodeColumn()));
+		} else if (ex.hasCodeLine()) {
+			position = positionForUnifiedLine(ex.getCodeLine(), Math.max(0, ex.getCodeColumn()), tabs, fallbackUri);
+		} else {
+			position = positionAtOffset(0, tabs, unifiedSource, fallbackUri);
+		}
+		diagnostics.add(new MappedDiagnostic(position.uri,
+				new EcjDiagnosticsEngine.DiagnosticData(position.line, position.character,
+						position.line, position.character + 1, 1, 0, ex.getMessage())));
+		return diagnostics;
+	}
+
+	private static OriginalPosition positionForIssue(PdePreprocessIssue issue, List<PdeTab> tabs, String unifiedSource,
+			String fallbackUri) {
+		int line = Math.max(0, issue.getLine() - 1);
+		int offset = offset(unifiedSource, line, Math.max(0, issue.getCharPositionInLine()));
+		return positionAtOffset(offset, tabs, unifiedSource, fallbackUri);
+	}
+
+	private static OriginalPosition positionForUnifiedLine(int unifiedLine, int character, List<PdeTab> tabs,
+			String fallbackUri) {
+		PdeTab selected = null;
+		for (PdeTab tab : tabs) {
+			if (unifiedLine >= tab.startLine) {
+				selected = tab;
 			}
 		}
-
-		String prefix = imports.toString()
-				+ "\npublic class " + SKETCH_CLASS + " extends processing.core.PApplet {\n";
-		StringBuilder body = new StringBuilder();
-		int generatedLine = lineCount(prefix);
-		for (PdeSource pde : pdes) {
-			if (pde.lineCount > 0) {
-				segments.add(new SourceSegment(pde.uri, generatedLine, 0, pde.lineCount,
-						pde.lineMappings.toArray(new int[0][])));
-				body.append(pde.body);
-				generatedLine += pde.lineCount;
-			}
+		if (selected == null) {
+			return new OriginalPosition(fallbackUri, 0, character);
 		}
-
-		String source = prefix + body + "}\n";
-		return new ProcessingSketch(syntheticUri(entrypointUri), source,
-				segments.toArray(new SourceSegment[0]), sourceUris(pdes));
+		return new OriginalPosition(selected.uri, Math.max(0, unifiedLine - selected.startLine), character);
 	}
 
 	MemoryCompilationUnit compilationUnit() {
@@ -70,307 +147,79 @@ final class ProcessingSketch {
 	List<MappedDiagnostic> mapDiagnostics(List<EcjDiagnosticsEngine.DiagnosticData> diagnostics) {
 		List<MappedDiagnostic> mapped = new ArrayList<>(diagnostics.size());
 		for (EcjDiagnosticsEngine.DiagnosticData diagnostic : diagnostics) {
-			SourceSegment segment = segmentFor(diagnostic.startLine);
-			if (segment == null) {
+			OriginalPosition start = generatedPositionToOriginal(diagnostic.startLine, diagnostic.startCharacter);
+			OriginalPosition end = generatedPositionToOriginal(diagnostic.endLine, diagnostic.endCharacter);
+			if (start == null) {
 				continue;
 			}
-			int mappedStartLine = segment.sourceStartLine + diagnostic.startLine - segment.generatedStartLine;
-			int generatedEndLine = Math.min(diagnostic.endLine, segment.generatedStartLine + segment.lineCount - 1);
-			int mappedEndLine = segment.sourceStartLine
-					+ generatedEndLine - segment.generatedStartLine;
-			if (mappedEndLine < mappedStartLine) {
-				mappedEndLine = mappedStartLine;
+			if (end == null || !start.uri.equals(end.uri) || end.line < start.line) {
+				end = new OriginalPosition(start.uri, start.line, start.character + 1);
 			}
-			mapped.add(new MappedDiagnostic(segment.uri,
-					new EcjDiagnosticsEngine.DiagnosticData(mappedStartLine,
-							segment.mapCharacter(diagnostic.startLine, diagnostic.startCharacter),
-							mappedEndLine, segment.mapCharacter(generatedEndLine, diagnostic.endCharacter),
+			mapped.add(new MappedDiagnostic(start.uri,
+					new EcjDiagnosticsEngine.DiagnosticData(start.line, start.character,
+							end.line, Math.max(end.character, start.character + 1),
 							diagnostic.severity, diagnostic.code,
 							diagnostic.message)));
 		}
 		return mapped;
 	}
 
-	private SourceSegment segmentFor(int generatedLine) {
-		for (SourceSegment segment : segments) {
-			if (generatedLine >= segment.generatedStartLine
-					&& generatedLine < segment.generatedStartLine + segment.lineCount) {
-				return segment;
-			}
-		}
-		return null;
-	}
-
-	private static void appendImplicitImports(StringBuilder imports) {
-		imports.append("import processing.core.*;\n");
-		imports.append("import processing.data.*;\n");
-		imports.append("import processing.event.*;\n");
-		imports.append("import processing.opengl.*;\n");
-		imports.append("import java.util.*;\n");
-		imports.append("import java.io.*;\n");
-	}
-
-	private static PdeSource processPde(String uri, String source) {
-		PdeSource pde = new PdeSource(uri);
-		if (source == null || source.isEmpty()) {
-			return pde;
-		}
-		int sourceLine = 0;
-		int index = 0;
-		while (index < source.length()) {
-			int lineEnd = source.indexOf('\n', index);
-			if (lineEnd < 0) {
-				lineEnd = source.length();
-			}
-			String line = source.substring(index, lineEnd);
-			String trimmed = line.trim();
-			if (trimmed.startsWith("import ") && trimmed.endsWith(";")) {
-				pde.imports.add(new ImportLine(uri, sourceLine, trimmed));
-				pde.body.append('\n');
-				pde.lineMappings.add(null);
-			} else {
-				ProcessedLine processed = processingLine(line, trimmed, pde.inBlockComment);
-				pde.inBlockComment = processed.inBlockComment;
-				pde.body.append(processed.text);
-				pde.body.append('\n');
-				pde.lineMappings.add(processed.mapping);
-			}
-			pde.lineCount++;
-			sourceLine++;
-			index = lineEnd + 1;
-		}
-		return pde;
-	}
-
-	private static ProcessedLine processingLine(String line, String trimmed, boolean inBlockComment) {
-		boolean insertPublic = shouldInsertPublic(trimmed);
-		StringBuilder output = new StringBuilder(line.length() + 8);
-		List<Integer> mapping = new ArrayList<>();
-		mapping.add(Integer.valueOf(0));
-		boolean[] blockComment = new boolean[] { inBlockComment };
-		int publicOffset = insertPublic ? line.indexOf(trimmed) : -1;
-		int index = 0;
-		while (index < line.length()) {
-			if (index == publicOffset) {
-				appendSynthetic(output, mapping, "public ", index);
-			}
-			index = appendProcessingToken(line, index, output, mapping, blockComment);
-		}
-		if (line.length() == publicOffset) {
-			appendSynthetic(output, mapping, "public ", line.length());
-		}
-		return new ProcessedLine(output.toString(), toMapping(output, mapping), blockComment[0]);
-	}
-
-	private static boolean shouldInsertPublic(String trimmed) {
-		if (trimmed.startsWith("public ") || trimmed.startsWith("private ") || trimmed.startsWith("protected ")) {
-			return false;
-		}
-		if (!isProcessingLifecycleMethod(trimmed)) {
-			return false;
-		}
-		return true;
-	}
-
-	private static int appendProcessingToken(String line, int index, StringBuilder output, List<Integer> mapping,
-			boolean[] inBlockComment) {
-		char current = line.charAt(index);
-		if (inBlockComment[0]) {
-			appendOriginal(output, mapping, current, index);
-			if (current == '*' && index + 1 < line.length() && line.charAt(index + 1) == '/') {
-				appendOriginal(output, mapping, '/', index + 1);
-				inBlockComment[0] = false;
-				return index + 2;
-			}
-			return index + 1;
-		}
-		if (current == '/' && index + 1 < line.length()) {
-			char next = line.charAt(index + 1);
-			if (next == '/') {
-				appendOriginalRest(line, index, output, mapping);
-				return line.length();
-			}
-			if (next == '*') {
-				appendOriginal(output, mapping, current, index);
-				appendOriginal(output, mapping, next, index + 1);
-				inBlockComment[0] = true;
-				return index + 2;
-			}
-		}
-		if (current == '"' || current == '\'') {
-			return appendQuoted(line, index, output, mapping, current);
-		}
-		if (startsDecimalLiteral(line, index)) {
-			return appendDecimalLiteral(line, index, output, mapping);
-		}
-		appendOriginal(output, mapping, current, index);
-		return index + 1;
-	}
-
-	private static int appendQuoted(String line, int index, StringBuilder output, List<Integer> mapping, char quote) {
-		appendOriginal(output, mapping, quote, index++);
-		boolean escaped = false;
-		while (index < line.length()) {
-			char current = line.charAt(index);
-			appendOriginal(output, mapping, current, index);
-			index++;
-			if (escaped) {
-				escaped = false;
-			} else if (current == '\\') {
-				escaped = true;
-			} else if (current == quote) {
-				break;
-			}
-		}
-		return index;
-	}
-
-	private static boolean startsDecimalLiteral(String line, int index) {
-		char current = line.charAt(index);
-		if (current == '.') {
-			return index + 1 < line.length() && Character.isDigit(line.charAt(index + 1))
-					&& !isNumericPart(previousChar(line, index));
-		}
-		if (!Character.isDigit(current)) {
-			return false;
-		}
-		char previous = previousChar(line, index);
-		return !isNumericPart(previous) && previous != '.';
-	}
-
-	private static int appendDecimalLiteral(String line, int index, StringBuilder output, List<Integer> mapping) {
-		int start = index;
-		boolean decimal = false;
-		boolean hexadecimal = index + 1 < line.length() && line.charAt(index) == '0'
-				&& (line.charAt(index + 1) == 'x' || line.charAt(index + 1) == 'X');
-		if (line.charAt(index) == '.') {
-			decimal = true;
-			appendOriginal(output, mapping, '.', index++);
-			index = appendDigits(line, index, output, mapping);
-		} else {
-			index = appendDigits(line, index, output, mapping);
-			if (!hexadecimal && index < line.length() && line.charAt(index) == '.'
-					&& (index + 1 >= line.length() || line.charAt(index + 1) != '.')) {
-				decimal = true;
-				appendOriginal(output, mapping, '.', index++);
-				index = appendDigits(line, index, output, mapping);
-			}
-		}
-		if (!hexadecimal && index < line.length() && (line.charAt(index) == 'e' || line.charAt(index) == 'E')) {
-			int exponent = index;
-			int next = exponent + 1;
-			if (next < line.length() && (line.charAt(next) == '+' || line.charAt(next) == '-')) {
-				next++;
-			}
-			if (next < line.length() && Character.isDigit(line.charAt(next))) {
-				decimal = true;
-				appendOriginal(output, mapping, line.charAt(index), index++);
-				if (index < line.length() && (line.charAt(index) == '+' || line.charAt(index) == '-')) {
-					appendOriginal(output, mapping, line.charAt(index), index++);
-				}
-				index = appendDigits(line, index, output, mapping);
-			}
-		}
-		if (index < line.length() && isFloatSuffix(line.charAt(index))) {
-			appendOriginal(output, mapping, line.charAt(index), index++);
-			return index;
-		}
-		if (decimal && !isIdentifierPart(nextChar(line, index))) {
-			appendSynthetic(output, mapping, "f", index);
-		}
-		if (index == start) {
-			appendOriginal(output, mapping, line.charAt(index), index++);
-		}
-		return index;
-	}
-
-	private static int appendDigits(String line, int index, StringBuilder output, List<Integer> mapping) {
-		while (index < line.length()) {
-			char current = line.charAt(index);
-			if (!Character.isDigit(current) && current != '_') {
-				break;
-			}
-			appendOriginal(output, mapping, current, index++);
-		}
-		return index;
-	}
-
-	private static boolean isFloatSuffix(char value) {
-		return value == 'f' || value == 'F' || value == 'd' || value == 'D';
-	}
-
-	private static char previousChar(String line, int index) {
-		return index > 0 ? line.charAt(index - 1) : 0;
-	}
-
-	private static char nextChar(String line, int index) {
-		return index < line.length() ? line.charAt(index) : 0;
-	}
-
-	private static boolean isNumericPart(char value) {
-		return Character.isLetterOrDigit(value) || value == '_' || value == '$';
-	}
-
-	private static boolean isIdentifierPart(char value) {
-		return Character.isLetterOrDigit(value) || value == '_' || value == '$';
-	}
-
-	private static void appendOriginalRest(String line, int index, StringBuilder output, List<Integer> mapping) {
-		while (index < line.length()) {
-			appendOriginal(output, mapping, line.charAt(index), index++);
-		}
-	}
-
-	private static void appendOriginal(StringBuilder output, List<Integer> mapping, char value, int originalIndex) {
-		output.append(value);
-		mapping.add(Integer.valueOf(originalIndex + 1));
-	}
-
-	private static void appendSynthetic(StringBuilder output, List<Integer> mapping, String value, int originalIndex) {
-		for (int i = 0; i < value.length(); i++) {
-			output.append(value.charAt(i));
-			mapping.add(Integer.valueOf(originalIndex));
-		}
-	}
-
-	private static int[] toMapping(StringBuilder output, List<Integer> mapping) {
-		if (output.length() + 1 != mapping.size()) {
+	private OriginalPosition generatedPositionToOriginal(int generatedLine, int generatedCharacter) {
+		int generatedOffset = offset(source, generatedLine, generatedCharacter);
+		int inputOffset = offsetMapper.getInputOffset(generatedOffset);
+		if (inputOffset < 0) {
 			return null;
 		}
-		boolean identity = true;
-		int[] result = new int[mapping.size()];
-		for (int i = 0; i < mapping.size(); i++) {
-			result[i] = mapping.get(i).intValue();
-			if (result[i] != i) {
-				identity = false;
-			}
-		}
-		return identity ? null : result;
+		return positionAtOffset(inputOffset, tabs, unifiedSource, sourceUris.length == 0 ? "" : sourceUris[0]);
 	}
 
-	private static boolean isProcessingLifecycleMethod(String trimmed) {
-		String[] names = {
-				"settings",
-				"setup",
-				"draw",
-				"mousePressed",
-				"mouseReleased",
-				"mouseClicked",
-				"mouseDragged",
-				"mouseMoved",
-				"mouseEntered",
-				"mouseExited",
-				"mouseWheel",
-				"keyPressed",
-				"keyReleased",
-				"keyTyped"
-		};
-		for (String name : names) {
-			if (trimmed.startsWith("void " + name + "(")) {
-				return true;
+	private static OriginalPosition positionAtOffset(int offset, List<PdeTab> tabs, String unifiedSource, String fallbackUri) {
+		PdeTab selected = null;
+		for (PdeTab tab : tabs) {
+			if (offset >= tab.startOffset) {
+				selected = tab;
 			}
 		}
-		return false;
+		if (selected == null) {
+			return new OriginalPosition(fallbackUri, 0, 0);
+		}
+		int localOffset = Math.max(0, Math.min(offset - selected.startOffset, selected.length));
+		LineCharacter position = lineCharacter(unifiedSource, selected.startOffset + localOffset);
+		return new OriginalPosition(selected.uri, Math.max(0, position.line - selected.startLine), position.character);
+	}
+
+	private static int offset(String source, int line, int character) {
+		int currentLine = 0;
+		int currentCharacter = 0;
+		for (int index = 0; index < source.length(); index++) {
+			if (currentLine == line && currentCharacter == character) {
+				return index;
+			}
+			char c = source.charAt(index);
+			if (c == '\n') {
+				currentLine++;
+				currentCharacter = 0;
+			} else {
+				currentCharacter++;
+			}
+		}
+		return source.length();
+	}
+
+	private static LineCharacter lineCharacter(String source, int offset) {
+		int line = 0;
+		int character = 0;
+		int max = Math.max(0, Math.min(offset, source.length()));
+		for (int i = 0; i < max; i++) {
+			char c = source.charAt(i);
+			if (c == '\n') {
+				line++;
+				character = 0;
+			} else {
+				character++;
+			}
+		}
+		return new LineCharacter(line, character);
 	}
 
 	private static String syntheticUri(String entrypointUri) {
@@ -416,75 +265,47 @@ final class ProcessingSketch {
 
 	private static final class PdeSource {
 		final String uri;
-		final StringBuilder body = new StringBuilder();
-		final List<ImportLine> imports = new ArrayList<>();
-		final List<int[]> lineMappings = new ArrayList<>();
-		boolean inBlockComment;
-		int lineCount;
+		final String source;
 
-		PdeSource(String uri) {
+		PdeSource(String uri, String source) {
 			this.uri = uri;
+			this.source = source == null ? "" : source;
 		}
 	}
 
-	private static final class ProcessedLine {
-		final String text;
-		final int[] mapping;
-		final boolean inBlockComment;
-
-		ProcessedLine(String text, int[] mapping, boolean inBlockComment) {
-			this.text = text;
-			this.mapping = mapping;
-			this.inBlockComment = inBlockComment;
-		}
-	}
-
-	private static final class ImportLine {
+	private static final class PdeTab {
 		final String uri;
-		final int sourceLine;
-		final String text;
+		final int startLine;
+		final int startOffset;
+		final int length;
 
-		ImportLine(String uri, int sourceLine, String text) {
+		PdeTab(String uri, int startLine, int startOffset, int length) {
 			this.uri = uri;
-			this.sourceLine = sourceLine;
-			this.text = text;
+			this.startLine = startLine;
+			this.startOffset = startOffset;
+			this.length = length;
 		}
 	}
 
-	private static final class SourceSegment {
+	private static final class OriginalPosition {
 		final String uri;
-		final int generatedStartLine;
-		final int sourceStartLine;
-		final int lineCount;
-		final int[][] lineMappings;
+		final int line;
+		final int character;
 
-		SourceSegment(String uri, int generatedStartLine, int sourceStartLine, int lineCount, int[][] lineMappings) {
+		OriginalPosition(String uri, int line, int character) {
 			this.uri = uri;
-			this.generatedStartLine = generatedStartLine;
-			this.sourceStartLine = sourceStartLine;
-			this.lineCount = lineCount;
-			this.lineMappings = lineMappings;
+			this.line = line;
+			this.character = character;
 		}
+	}
 
-		int mapCharacter(int generatedLine, int generatedCharacter) {
-			if (lineMappings == null) {
-				return generatedCharacter;
-			}
-			int lineIndex = generatedLine - generatedStartLine;
-			if (lineIndex < 0 || lineIndex >= lineMappings.length) {
-				return generatedCharacter;
-			}
-			int[] mapping = lineMappings[lineIndex];
-			if (mapping == null || mapping.length == 0) {
-				return generatedCharacter;
-			}
-			if (generatedCharacter < 0) {
-				return 0;
-			}
-			if (generatedCharacter < mapping.length) {
-				return mapping[generatedCharacter];
-			}
-			return mapping[mapping.length - 1] + generatedCharacter - mapping.length + 1;
+	private static final class LineCharacter {
+		final int line;
+		final int character;
+
+		LineCharacter(int line, int character) {
+			this.line = line;
+			this.character = character;
 		}
 	}
 }

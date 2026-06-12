@@ -9,7 +9,10 @@ final class WebLspEndpoint {
 		String method = JsonSupport.stringField(payload, "method");
 		if ("initialize".equals(method)) {
 			return "{\"jsonrpc\":\"2.0\",\"id\":" + JsonSupport.idField(payload)
-					+ ",\"result\":{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1}}}}";
+					+ ",\"result\":{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},"
+					+ "\"completionProvider\":{\"resolveProvider\":false,\"triggerCharacters\":[\".\",\"@\"]},"
+					+ "\"hoverProvider\":true,"
+					+ "\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"],\"retriggerCharacters\":[\",\"]}}}}";
 		}
 		if ("initialized".equals(method) || "exit".equals(method)) {
 			return "";
@@ -22,6 +25,27 @@ final class WebLspEndpoint {
 			String uri = JsonSupport.stringField(payload, "uri");
 			String text = JsonSupport.lastStringField(payload, "text");
 			return engine.publishDiagnostics(uri, text);
+		}
+		if ("textDocument/completion".equals(method)) {
+			String uri = JsonSupport.stringField(payload, "uri");
+			int line = JsonSupport.intField(payload, "line");
+			int character = JsonSupport.intField(payload, "character");
+			return "{\"jsonrpc\":\"2.0\",\"id\":" + JsonSupport.idField(payload) + ",\"result\":"
+					+ engine.completion(uri, line, character) + "}";
+		}
+		if ("textDocument/hover".equals(method)) {
+			String uri = JsonSupport.stringField(payload, "uri");
+			int line = JsonSupport.intField(payload, "line");
+			int character = JsonSupport.intField(payload, "character");
+			return "{\"jsonrpc\":\"2.0\",\"id\":" + JsonSupport.idField(payload) + ",\"result\":"
+					+ engine.hover(uri, line, character) + "}";
+		}
+		if ("textDocument/signatureHelp".equals(method)) {
+			String uri = JsonSupport.stringField(payload, "uri");
+			int line = JsonSupport.intField(payload, "line");
+			int character = JsonSupport.intField(payload, "character");
+			return "{\"jsonrpc\":\"2.0\",\"id\":" + JsonSupport.idField(payload) + ",\"result\":"
+					+ engine.signatureHelp(uri, line, character) + "}";
 		}
 		if ("java/browserJdtLs/workspaceSources".equals(method)) {
 			String uri = JsonSupport.stringField(payload, "uri");

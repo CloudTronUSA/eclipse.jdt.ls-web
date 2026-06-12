@@ -4,6 +4,9 @@ export interface WebJdtLsApi {
 	fallbackError?: unknown;
 	lint(uri: string, source: string): string;
 	lintProcessing(entrypointUri: string, entrypointSource: string, additionalPdesJson: string): string;
+	complete(uri: string, source: string, line: number, character: number): string;
+	hover(uri: string, source: string, line: number, character: number): string;
+	signatureHelp(uri: string, source: string, line: number, character: number): string;
 	handle(payload: string): string;
 }
 
@@ -41,6 +44,9 @@ interface TeaVMGlobal {
 	};
 	lint?: unknown;
 	lintProcessing?: unknown;
+	complete?: unknown;
+	hover?: unknown;
+	signatureHelp?: unknown;
 	handle?: unknown;
 	document?: Document;
 }
@@ -108,7 +114,8 @@ function loadJs(config: NormalizedOptions): Promise<WebJdtLsApi> {
 }
 
 function createApi(target: "wasm" | "js", exports: Record<string, unknown>, raw: unknown): WebJdtLsApi {
-	const missing = ["lint", "lintProcessing", "handle"].filter(name => typeof exports[name] !== "function");
+	const missing = ["lint", "lintProcessing", "complete", "hover", "signatureHelp", "handle"]
+		.filter(name => typeof exports[name] !== "function");
 	if (missing.length > 0) {
 		throw new Error("JDT LS web " + target + " build is missing export(s): " + missing.join(", "));
 	}
@@ -117,6 +124,9 @@ function createApi(target: "wasm" | "js", exports: Record<string, unknown>, raw:
 		raw,
 		lint: exports.lint as WebJdtLsApi["lint"],
 		lintProcessing: exports.lintProcessing as WebJdtLsApi["lintProcessing"],
+		complete: exports.complete as WebJdtLsApi["complete"],
+		hover: exports.hover as WebJdtLsApi["hover"],
+		signatureHelp: exports.signatureHelp as WebJdtLsApi["signatureHelp"],
 		handle: exports.handle as WebJdtLsApi["handle"]
 	};
 }

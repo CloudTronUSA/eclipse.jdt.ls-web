@@ -11,6 +11,8 @@ import org.teavm.classlib.ResourceSupplierContext;
 
 public final class EcjResourceSupplier implements ResourceSupplier {
 
+	private static final String INDEX_PREFIX = "org/eclipse/jdt/ls/web/internal/resources/";
+
 	@Override
 	public String[] supplyResources(ResourceSupplierContext context) {
 		String[] unicodeDirectories = {
@@ -51,6 +53,7 @@ public final class EcjResourceSupplier implements ResourceSupplier {
 		resources.add(prefix + "unicode13/part3.rsc");
 		resources.add(prefix + "unicode13/part14.rsc");
 		addLineSeparatedResources(resources, "jdk-signature.resources");
+		addLineSeparatedResources(resources, "teavm-javac-classpath.resources");
 		addProcessingCoreResources(resources);
 		return resources.toArray(new String[0]);
 	}
@@ -60,6 +63,7 @@ public final class EcjResourceSupplier implements ResourceSupplier {
 	}
 
 	private static void addLineSeparatedResources(List<String> resources, String resourceName) {
+		resources.add(INDEX_PREFIX + resourceName);
 		InputStream input = EcjResourceSupplier.class.getResourceAsStream(resourceName);
 		if (input == null) {
 			return;
